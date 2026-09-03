@@ -1,9 +1,10 @@
-name: Deploy to AKS
+name: Deploy Server
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
+    paths: [ 'server/**' ]
+  workflow_dispatch:
 
 permissions:
   id-token: write
@@ -13,115 +14,33 @@ env:
   ACR_NAME: bhaskararitraacr
   RESOURCE_GROUP: rg-node-cicd
   AKS_CLUSTER: my-aks-cluster
-  CLIENT_IMAGE: client
-  SERVER_IMAGE: server
 
 jobs:
-  build-and-deploy:
+  deploy-server:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          # For private repos, this ensures proper authentication
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Debug - Show directory structure
-        run: |
-          echo "Current directory: $(pwd)"
-          ls -la
-          echo "Checking for client directory..."
-          test -d ./client && echo "✅ client directory exists" || echo "❌ client directory NOT found"
-          echo "Checking for server directory..."
-          test -d ./server && echo "✅ server directory exists" || echo "❌ server directory NOT found"
-          echo "Checking for k8s directory..."
-          test -d ./k8s && echo "✅ k8s directory exists" || echo "❌ k8s directory NOT found"
-
-      - name: Azure login (OIDC)
+      - uses: actions/checkout@v4
+      
+      - name: Azure login
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Debug - Show Azure subscription
+      
+      - name: Build and push to ACR
         run: |
-          az account show
-          az account list --query "[?isDefault].{SubscriptionId:id, Name:name}" -o table
-
-      - name: Log in to ACR
-        run: |
-          echo "Logging into ACR: ${{ env.ACR_NAME }}"
           az acr login --name ${{ env.ACR_NAME }}
-        # Add retry logic for network issues
-        continue-on-error: false
-
-      - name: Build and push client image
-        run: |
-          cd ./client
-          echo "Building client image..."
-          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.CLIENT_IMAGE }}:${{ github.sha }} .
-          echo "Pushing client image..."
-          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.CLIENT_IMAGE }}:${{ github.sha }}
-        if: success()
-
-      - name: Build and push server image
-        run: |
-          cd ./server
-          echo "Building server image..."
-          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }} .
-          echo "Pushing server image..."
-          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }}
-        if: success()
-
-      - name: Get AKS credentials
-        run: |
-          echo "Getting AKS credentials for cluster: ${{ env.AKS_CLUSTER }}"
-          az aks get-credentials \
-            --resource-group ${{ env.RESOURCE_GROUP }} \
-            --name ${{ env.AKS_CLUSTER }} \
-            --overwrite-existing \
-            --debug  # This will show detailed logs
-        if: success()
-
-      - name: Verify k8s manifests exist
-        run: |
-          echo "Checking k8s manifests..."
-          ls -la ./k8s/
-          test -f ./k8s/client-deployment.yaml || (echo "❌ client-deployment.yaml not found" && exit 1)
-          test -f ./k8s/server-deployment.yaml || (echo "❌ server-deployment.yaml not found" && exit 1)
-          echo "✅ All manifest files found"
-
-      - name: Set image tags in manifests
-        run: |
-          echo "Updating image tags..."
-          # Backup original files
-          cp ./k8s/client-deployment.yaml ./k8s/client-deployment.yaml.bak
-          cp ./k8s/server-deployment.yaml ./k8s/server-deployment.yaml.bak
-          
-          # Update tags
-          sed -i "s|CLIENT_IMAGE_TAG|${{ env.ACR_NAME }}.azurecr.io/${{ env.CLIENT_IMAGE }}:${{ github.sha }}|g" ./k8s/client-deployment.yaml
-          sed -i "s|SERVER_IMAGE_TAG|${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }}|g" ./k8s/server-deployment.yaml
-          
-          # Verify changes
-          echo "Updated client-deployment.yaml:"
-          grep "image:" ./k8s/client-deployment.yaml || echo "No image line found in client-deployment.yaml"
-          echo "Updated server-deployment.yaml:"
-          grep "image:" ./k8s/server-deployment.yaml || echo "No image line found in server-deployment.yaml"
-
+          docker build -t ${{ env.ACR_NAME }}.azurecr.io/server:${{ github.sha }} ./server
+          docker push ${{ env.ACR_NAME }}.azurecr.io/server:${{ github.sha }}
+      
       - name: Deploy to AKS
         run: |
-          echo "Applying k8s manifests..."
-          kubectl apply -f ./k8s/
-          echo "✅ Manifests applied successfully"
-
-      - name: Verify rollout
+          az aks get-credentials -g ${{ env.RESOURCE_GROUP }} -n ${{ env.AKS_CLUSTER }}
+          sed -i "s|SERVER_IMAGE_TAG|${{ env.ACR_NAME }}.azurecr.io/server:${{ github.sha }}|g" ./k8s/server-deployment.yaml
+          kubectl apply -f ./k8s/server-deployment.yaml
+          kubectl rollout status deployment/server-deployment --timeout=5m
+      
+      - name: Show service endpoint
         run: |
-          echo "Waiting for client deployment rollout..."
-          kubectl rollout status deployment/client-deployment --timeout=5m || (echo "❌ Client deployment failed" && exit 1)
-          echo "✅ Client deployment successful"
-          
-          echo "Waiting for server deployment rollout..."
-          kubectl rollout status deployment/server-deployment --timeout=5m || (echo "❌ Server deployment failed" && exit 1)
-          echo "✅ Server deployment successful"
+          kubectl get service server-service
