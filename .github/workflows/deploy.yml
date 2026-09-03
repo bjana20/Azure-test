@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'server/**'  # Only trigger when server files change
-  workflow_dispatch:  # Allow manual trigger
 
 permissions:
   id-token: write
@@ -19,122 +16,126 @@ env:
   SERVER_IMAGE: server
 
 jobs:
-  build-and-deploy-server:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
+
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Debug - Show directory structure
+
+      # 2. Check project structure
+      - name: Check directory structure
         run: |
-          echo "Current directory: $(pwd)"
-          ls -la
-          echo "Checking for server directory..."
-          test -d ./server && echo "✅ server directory exists" || echo "❌ server directory NOT found"
-          echo "Checking for k8s directory..."
-          test -d ./k8s && echo "✅ k8s directory exists" || echo "❌ k8s directory NOT found"
-          test -f ./k8s/server-deployment.yaml && echo "✅ server-deployment.yaml exists" || echo "❌ server-deployment.yaml NOT found"
+          echo "Current directory:"
+          pwd
 
-      - name: Azure login (OIDC)
+          echo "Project files:"
+          ls -la
+
+          echo "Checking server directory..."
+          test -d ./server && echo "✅ Server directory exists" || (echo "❌ Server directory NOT found" && exit 1)
+
+          echo "Checking k8s directory..."
+          test -d ./k8s && echo "✅ k8s directory exists" || (echo "❌ k8s directory NOT found" && exit 1)
+
+
+      # 3. Login to Azure using OIDC
+      - name: Azure Login
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Debug - Show Azure subscription
-        run: |
-          az account show
-          az account list --query "[?isDefault].{SubscriptionId:id, Name:name}" -o table
 
-      - name: Log in to ACR
+      # 4. Login to Azure Container Registry
+      - name: Login to ACR
         run: |
-          echo "Logging into ACR: ${{ env.ACR_NAME }}"
+          echo "Logging into ACR..."
           az acr login --name ${{ env.ACR_NAME }}
 
-      - name: Build and push server image
-        run: |
-          cd ./server
-          echo "Building server image..."
-          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }} .
-          echo "Pushing server image..."
-          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }}
-          echo "✅ Server image built and pushed successfully"
 
-      - name: Get AKS credentials
+      # 5. Build Docker image
+      - name: Build Server Docker Image
         run: |
-          echo "Getting AKS credentials for cluster: ${{ env.AKS_CLUSTER }}"
+          echo "Building server image..."
+
+          docker build \
+            -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }} \
+            ./server
+
+
+      # 6. Push Docker image to ACR
+      - name: Push Server Docker Image
+        run: |
+          echo "Pushing server image to ACR..."
+
+          docker push \
+            ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }}
+
+
+      # 7. Get AKS credentials
+      - name: Get AKS Credentials
+        run: |
           az aks get-credentials \
             --resource-group ${{ env.RESOURCE_GROUP }} \
             --name ${{ env.AKS_CLUSTER }} \
             --overwrite-existing
 
-      - name: Verify k8s manifests exist
+
+      # 8. Verify Kubernetes manifest
+      - name: Verify Kubernetes Manifest
         run: |
-          echo "Checking k8s manifests..."
+          echo "Checking Kubernetes files..."
+
           ls -la ./k8s/
-          test -f ./k8s/server-deployment.yaml || (echo "❌ server-deployment.yaml not found" && exit 1)
-          echo "✅ server-deployment.yaml found"
 
-      - name: Set image tag in manifest
-        run: |
-          echo "Updating image tag..."
-          # Backup original file
-          cp ./k8s/server-deployment.yaml ./k8s/server-deployment.yaml.bak
-          
-          # Update tag
-          sed -i "s|SERVER_IMAGE_TAG|${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }}|g" ./k8s/server-deployment.yaml
-          
-          # Verify changes
-          echo "Updated server-deployment.yaml:"
-          grep "image:" ./k8s/server-deployment.yaml || echo "⚠️ No 'image:' line found"
+          test -f ./k8s/server-deployment.yaml || \
+          (echo "❌ server-deployment.yaml not found" && exit 1)
 
-      - name: Deploy server to AKS
+          echo "✅ Kubernetes manifest found"
+
+
+      # 9. Replace Docker image
+      - name: Update Server Image Tag
         run: |
-          echo "Applying server manifest..."
+          echo "Updating Docker image..."
+
+          sed -i \
+            "s|SERVER_IMAGE_TAG|${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }}|g" \
+            ./k8s/server-deployment.yaml
+
+          echo "Updated image:"
+          grep "image:" ./k8s/server-deployment.yaml
+
+
+      # 10. Deploy to AKS
+      - name: Deploy Server to AKS
+        run: |
+          echo "Deploying to AKS..."
+
           kubectl apply -f ./k8s/server-deployment.yaml
-          echo "✅ Server manifest applied successfully"
 
-      - name: Wait for server pod to start
+          echo "✅ Deployment applied successfully"
+
+
+      # 11. Verify deployment
+      - name: Verify Server Rollout
         run: |
-          echo "Waiting for server pod to be ready..."
-          sleep 10
-          kubectl get pods -l app=server
+          echo "Waiting for server deployment..."
 
-      - name: Debug server deployment
+          kubectl rollout status \
+            deployment/server-deployment \
+            --timeout=5m
+
+          echo "✅ Server deployment successful"
+
+
+      # 12. Show pods
+      - name: Check Pods
         run: |
-          echo "=== Server Pod Status ==="
-          kubectl get pods -l app=server -o wide
-          
-          echo "=== Server Pod Details ==="
-          kubectl describe pods -l app=server
-          
-          echo "=== Server Logs ==="
-          kubectl logs -l app=server --tail=50 || echo "No logs available"
-          
-          echo "=== Recent Events ==="
-          kubectl get events --sort-by='.lastTimestamp' | tail -20
-
-      - name: Verify server rollout
-        run: |
-          echo "Waiting for server deployment rollout..."
-          kubectl rollout status deployment/server-deployment --timeout=5m
-          echo "✅ Server deployment successful!"
-
-      - name: Get service endpoint
-        run: |
-          echo "=== Server Service ==="
-          kubectl get service server-service
-          echo ""
-          echo "To access the server, get the external IP:"
-          echo "kubectl get service server-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}'"
-          echo ""
-          echo "Or use port-forwarding for local testing:"
-          echo "kubectl port-forward service/server-service 4000:80"
-
-      - name: Azure logout
-        run: az logout
-        if: always()
+          kubectl get pods
+          kubectl get services
