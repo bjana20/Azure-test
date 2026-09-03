@@ -18,7 +18,7 @@ app.use(
 
 // API route
 app.get("/api/message", (req, res) => {
-  res.json({ message: "Hello from Bhaskar server" });
+  res.json({ message: "Hello from Bhaskar 2 server" });
 });
 
 const PORT = 4000;
