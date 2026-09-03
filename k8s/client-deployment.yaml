@@ -16,12 +16,12 @@ spec:
     spec:
       containers:
       - name: client
-        image: CLIENT_IMAGE_TAG  # This will be replaced by your workflow
+        image: CLIENT_IMAGE_TAG
         ports:
-        - containerPort: 5173  # Vite default port
+        - containerPort: 3000  # Changed to match your Dockerfile
         env:
         - name: VITE_API_URL
-          value: "http://server-service"  # Kubernetes service name
+          value: "http://server-service"  # Internal Kubernetes service name
         resources:
           requests:
             memory: "128Mi"
@@ -29,16 +29,17 @@ spec:
           limits:
             memory: "256Mi"
             cpu: "200m"
+        # Simplified health checks for serve
         livenessProbe:
           httpGet:
             path: /
-            port: 5173
-          initialDelaySeconds: 30
+            port: 3000
+          initialDelaySeconds: 10
           periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /
-            port: 5173
+            port: 3000
           initialDelaySeconds: 5
           periodSeconds: 5
 ---
@@ -51,6 +52,6 @@ spec:
     app: client
   ports:
   - protocol: TCP
-    port: 80
-    targetPort: 5173
-  type: LoadBalancer  # Exposes client externally
+    port: 80          # External port
+    targetPort: 3000  # Container port
+  type: LoadBalancer
