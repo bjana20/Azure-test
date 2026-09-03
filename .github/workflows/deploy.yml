@@ -1,0 +1,66 @@
+name: Deploy to AKS
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write   # required for OIDC login to Azure
+  contents: read
+
+env:
+  ACR_NAME: bhaskararitraacr
+  RESOURCE_GROUP: rg-node-cicd
+  AKS_CLUSTER: my-aks-cluster
+  CLIENT_IMAGE: client
+  SERVER_IMAGE: server
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to ACR
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Build and push client image
+        run: |
+          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.CLIENT_IMAGE }}:${{ github.sha }} ./client
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.CLIENT_IMAGE }}:${{ github.sha }}
+
+      - name: Build and push server image
+        run: |
+          docker build -t ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }} ./server
+          docker push ${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.AKS_CLUSTER }} \
+            --overwrite-existing
+
+      - name: Set image tags in manifests
+        run: |
+          sed -i "s|CLIENT_IMAGE_TAG|${{ env.ACR_NAME }}.azurecr.io/${{ env.CLIENT_IMAGE }}:${{ github.sha }}|g" k8s/client-deployment.yaml
+          sed -i "s|SERVER_IMAGE_TAG|${{ env.ACR_NAME }}.azurecr.io/${{ env.SERVER_IMAGE }}:${{ github.sha }}|g" k8s/server-deployment.yaml
+
+      - name: Deploy to AKS
+        run: |
+          kubectl apply -f k8s/
+
+      - name: Verify rollout
+        run: |
+          kubectl rollout status deployment/client-deployment
+          kubectl rollout status deployment/server-deployment
